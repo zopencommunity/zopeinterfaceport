@@ -1,0 +1,231 @@
+# bump: zope.interface-version /ZOPE_INTERFACE_VERSION="(.*)"/ https://github.com/zopefoundation/zope.interface.git|semver:*
+ZOPE_INTERFACE_VERSION="8.5"
+
+###
+### Build control file for the zope.interface port
+###
+### zope.interface provides interface definitions and adapter registration.
+### buildbot and a good deal of the Twisted ecosystem depend on it. Unlike the
+### other two it has a working pure Python fallback, so the C accelerator can go
+### missing without anything failing -- only getting slower. The tests below pin
+### that down explicitly.
+###
+
+export ZOPEN_PROJECT_NAME="zope.interface"
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_CATEGORIES="development library"
+
+export ZOPEN_STABLE_URL="https://github.com/zopefoundation/zope.interface.git"
+export ZOPEN_STABLE_TAG="${ZOPE_INTERFACE_VERSION}"
+export ZOPEN_DEV_URL="https://github.com/zopefoundation/zope.interface.git"
+
+export ZOPEN_STABLE_DEPS="check_python"
+export ZOPEN_DEV_DEPS="check_python"
+export ZOPEN_RUNTIME_DEPS="check_python"
+
+export ZOPEN_BUILD_SYSTEM="Python"
+
+zopen_get_version() {
+  echo "${ZOPE_INTERFACE_VERSION}"
+}
+
+zopen_python_test() {
+  ZOPE_INTERFACE_EXPECTED_VERSION="${ZOPE_INTERFACE_VERSION}" python - <<'PYEOF'
+import os
+import sys
+import sysconfig
+
+# Exercise the installed wheel rather than the checkout, which would otherwise
+# shadow it and let the tests pass against source that was never packaged.
+#
+# realpath on both sides: /tmp is a symlink to /$SYSNAME/tmp here, so a path
+# spelled /tmp/... and a working directory of /S0W1/tmp/... are the same place
+# while abspath compares them as different.
+_here = os.path.realpath(os.getcwd())
+sys.path = [p for p in sys.path
+            if p not in ("", ".") and os.path.realpath(p) != _here]
+
+failures = 0
+total = 0
+
+
+def check(label, fn):
+    global failures, total
+    total += 1
+    try:
+        if fn():
+            print("PASS:", label)
+        else:
+            print("FAIL:", label, file=sys.stderr)
+            failures += 1
+    except Exception as exc:
+        print("FAIL:", label, "-", exc, file=sys.stderr)
+        failures += 1
+
+
+try:
+    import zope.interface
+    from zope.interface import Interface, Attribute, implementer, providedBy
+    from zope.interface.verify import verifyObject, verifyClass
+    from zope.interface.exceptions import Invalid
+except ImportError as exc:
+    print("FAIL: import zope.interface -", exc, file=sys.stderr)
+    print("zope.interface FAILED to import on Python %s" % sys.version.split()[0])
+    sys.exit(1)
+
+import importlib.metadata
+
+check("imported from the installed wheel, not the source tree",
+      lambda: os.path.realpath(zope.interface.__file__).startswith(
+          os.path.realpath(sysconfig.get_paths()["purelib"])))
+
+check("version is the one this port builds",
+      lambda: importlib.metadata.version("zope.interface")
+      == os.environ["ZOPE_INTERFACE_EXPECTED_VERSION"])
+
+
+def c_optimizations_in_use():
+    # Everything below passes on the pure Python fallback, so state plainly that
+    # the compiled accelerator is the one loaded. Without this the port could
+    # silently ship a wheel with no working extension at all.
+    from zope.interface import interface
+    return interface.InterfaceClass.__module__ is not None and \
+        __import__("zope.interface._zope_interface_coptimizations") is not None
+
+
+check("the C optimizations extension is importable", c_optimizations_in_use)
+
+
+class IGreeter(Interface):
+    name = Attribute("the name to greet")
+
+    def greet(subject):
+        """Return a greeting."""
+
+
+@implementer(IGreeter)
+class Greeter(object):
+    name = "zopen"
+
+    def greet(self, subject):
+        return "hello %s" % subject
+
+
+check("a class can declare that it implements an interface",
+      lambda: IGreeter.implementedBy(Greeter))
+
+check("an instance provides the interface its class implements",
+      lambda: IGreeter.providedBy(Greeter()))
+
+check("verifyObject accepts a conforming object",
+      lambda: verifyObject(IGreeter, Greeter()))
+
+check("verifyClass accepts a conforming class",
+      lambda: verifyClass(IGreeter, Greeter))
+
+
+def rejects_incomplete():
+    @implementer(IGreeter)
+    class Incomplete(object):
+        pass          # neither greet() nor name
+
+    try:
+        verifyObject(IGreeter, Incomplete())
+    except Invalid:
+        # Invalid, not BrokenImplementation: verifyObject collects every problem
+        # it finds and raises them together, so an object missing both the method
+        # and the attribute comes back as MultipleInvalid. Both derive from
+        # Invalid, which is what callers are meant to catch.
+        return True
+    return False
+
+
+check("verifyObject rejects an object missing the interface's methods",
+      rejects_incomplete)
+
+
+def interface_inheritance():
+    class ILoudGreeter(IGreeter):
+        def shout(subject):
+            """Return a loud greeting."""
+
+    return ILoudGreeter.extends(IGreeter) and \
+        IGreeter in ILoudGreeter.__bases__
+
+
+check("interfaces inherit from one another", interface_inheritance)
+
+
+def providedby_lists_interfaces():
+    return IGreeter in list(providedBy(Greeter()))
+
+
+check("providedBy enumerates the declared interfaces",
+      providedby_lists_interfaces)
+
+
+def direct_provision():
+    from zope.interface import directlyProvides
+
+    class Plain(object):
+        pass
+
+    obj = Plain()
+    directlyProvides(obj, IGreeter)
+    return IGreeter.providedBy(obj)
+
+
+check("an individual object can be given an interface directly",
+      direct_provision)
+
+
+def adapter_registry():
+    from zope.interface.adapter import AdapterRegistry
+
+    class IOut(Interface):
+        pass
+
+    registry = AdapterRegistry()
+    registry.register([IGreeter], IOut, "", "the-adapter")
+    return registry.lookup([IGreeter], IOut, "") == "the-adapter"
+
+
+check("the adapter registry registers and looks up", adapter_registry)
+
+print()
+print("zope.interface %s on Python %s  --  %d passed, %d failed" % (
+    importlib.metadata.version("zope.interface"),
+    sys.version.split()[0], total - failures, failures))
+sys.exit(1 if failures else 0)
+PYEOF
+}
+
+zopen_check_results() {
+  dir="$1"; pfx="$2"; chk="${dir}/${pfx}_check.log"
+  # No "|| echo 0": grep -c prints 0 when nothing matches and also exits 1, so
+  # the fallback appends a second zero and the arithmetic dies with FSUM9224.
+  passed=$(grep -c "^PASS:" "${chk}" 2>/dev/null)
+  failed=$(grep -c "^FAIL:" "${chk}" 2>/dev/null)
+  passed=${passed:-0}
+  failed=${failed:-0}
+  total=$((passed + failed))
+
+  # An interpreter whose test script dies before the first check contributes no
+  # PASS and no FAIL, so counting those alone would score a crash as a clean run.
+  interpreters=$(grep -c "^zope.interface .* on Python" "${chk}" 2>/dev/null)
+  interpreters=${interpreters:-0}
+  expected=$(echo "${ZOPEN_PYTHON_VERSIONS:-3.12 3.13 3.14}" | wc -w | tr -d ' ')
+  if [ "${interpreters}" -lt "${expected}" ]; then
+    silent=$((expected - interpreters))
+    failed=$((failed + silent))
+    total=$((total + silent))
+  fi
+
+  echo "actualFailures:${failed}"
+  echo "totalTests:${total}"
+  echo "expectedFailures:0"
+}
+
+zopen_append_to_validate_install() {
+  echo "python3 -c \"from zope.interface import Interface, implementer; import importlib.metadata; print('zope.interface', importlib.metadata.version('zope.interface'))\""
+}
