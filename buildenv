@@ -1,5 +1,5 @@
 # bump: zope.interface-version /ZOPE_INTERFACE_VERSION="(.*)"/ https://github.com/zopefoundation/zope.interface.git|semver:*
-ZOPE_INTERFACE_VERSION="8.5"
+ZOPE_INTERFACE_VERSION="8.6"
 
 ###
 ### Build control file for the zope.interface port
